@@ -19,7 +19,7 @@ static struct net_device *vnet_dev;
 
 static int vnet_open(struct net_device *dev)
 {
-    memcpy(dev->dev_addr, "NETMIR", ETH_ALEN);
+    memcpy(dev->dev_addr, "\x12\x34\x56\x78\x9A\xBC", ETH_ALEN);
     netif_start_queue(dev);
     printk(KERN_INFO "vnet_open\n");
     return 0;
@@ -61,12 +61,43 @@ static struct net_device_stats *vnet_stats(struct net_device *dev)
     return &priv->stats;
 }
 
+static int vnet_config(struct net_device *dev, struct ifmap *map)
+{
+    if (dev->flags & IFF_UP) /* can't act on a running interface */
+        return -EBUSY;
+
+    /* Don't allow changing the I/O address */
+    if (map->base_addr != dev->base_addr) {
+        printk(KERN_WARNING "netmirror: Can't change I/O address\n");
+        return -EOPNOTSUPP;
+    }
+    /* ignore other fields */
+    return 0;
+}
+
+static int vnet_ioctl(struct net_device *dev, struct ifreq *rq, int cmd)
+{
+    printk(KERN_DEBUG "ioctl %d\n", cmd);
+    return 0;
+}
+
 static const struct net_device_ops vnet_netdev_ops = {
     .ndo_open            = vnet_open,
     .ndo_stop            = vnet_release,
     .ndo_start_xmit      = vnet_tx,
     .ndo_tx_timeout      = vnet_tx_timeout,
-    .ndo_get_stats       = vnet_stats
+    .ndo_get_stats       = vnet_stats,
+    .ndo_set_config      = vnet_config,
+    .ndo_do_ioctl        = vnet_ioctl
+};
+
+static u32 always_on(struct net_device *dev)
+{
+    return 1;
+}
+
+static const struct ethtool_ops vnet_ethtool_ops = {
+    .get_link = always_on
 };
 
 static void vnet_setup(struct net_device *dev)
@@ -75,6 +106,7 @@ static void vnet_setup(struct net_device *dev)
 
     ether_setup(dev);
     dev->watchdog_timeo = 5; // jiffies
+    dev->ethtool_ops = &vnet_ethtool_ops;
     dev->netdev_ops = &vnet_netdev_ops;
 
     dev->flags |= IFF_NOARP;
@@ -94,7 +126,8 @@ static int mirror_fn(struct sk_buff *skb, struct net_device *dev,
     struct sk_buff *nskb;
 
     if (skb_shared(skb) && (dev != vnet_dev)) {
-        nskb = skb_clone(skb, GFP_ATOMIC);
+        // can't use skb_clone, because panic on namespace
+        nskb = skb_copy(skb, GFP_ATOMIC);
         if (!nskb)
             goto out;
         nskb->dev = vnet_dev;
